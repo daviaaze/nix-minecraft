@@ -200,6 +200,65 @@ in
             true.
           '';
 
+          bacukps = mkoption {
+            default = {};
+
+            enable = mkEnableOpt ''
+              Whether to enable Bacukps for this server.
+            '';
+
+            strategy = mkOption {
+              type = types.enum [ "local" "git" ];
+              default = "local";
+              description = ''
+                Whether to use Bacukps locally or with git.
+              '';
+            };
+
+            schedule = mkOption {
+              type = types.str;
+              default = "daily";
+              description = ''
+                The schedule to use for the backup timer.
+              '';
+            };
+
+            local = mkOption {
+              type = types.submodule {
+                options = {
+                  enable = mkEnableOpt ''
+                    Whether to enable Bacukps locally for this server.
+                  '';
+                };
+              };
+            };
+
+            git = mkOption {
+              type = types.submodule {
+                options = {
+                  enable = mkEnableOpt ''
+                    Whether to enable Bacukps remotely for this server.
+                  '';
+
+                  repo = mkOption {
+                    type = types.str;
+                    description = ''
+                      The git repository to use.
+                    '';
+                  };
+
+                  branch = mkOption {
+                    type = types.str;
+                    default = name;
+                    description = ''
+                      The git branch to use.
+                    '';
+                  };
+                };
+              };
+            };
+          };
+
           whitelist = mkOption {
             type =
               let
@@ -289,6 +348,7 @@ in
   config = mkIf cfg.enable (
     let
       servers = filterAttrs (_: cfg: cfg.enable) cfg.servers;
+      backups = filterAttrs (_: cfg: cfg.bacukps.enable) cfg.servers;
     in
     {
       users = {
@@ -514,7 +574,54 @@ in
                 '';
             };
           })
+        servers
+        (name: conf:
+        let
+          gitScript = ''
+                  cp -r ${cfg.dataDir}/${name}/{world, world_nether, world_end} ${cfg.dataDir}/${name}/backups/"
+                  
+                  if [ ! -d "$BACKUP_DIR/.git" ]; then
+                    cd "$BACKUP_DIR" || return
+                    git init
+                    git remote add origin "$GITHUB_REPO"
+                    git checkout ${name}
+                  fi
+
+                  cd backups || return
+                  git add -A
+                  git commit -m "Automatic backup $date '+%Y-%m-%d_%H-%M-%S'"
+                  git push -u origin ${name}
+                  '';
+          localScript = ''
+                  cp -r ${cfg.dataDir}/${name}/{world, world_nether, world_end} ${cfg.dataDir}/${name}/backups/"
+                  zip -r ${cfg.dataDir}/${name}/backups/${name}-$(date '+%Y-%m-%d_%H-%M-%S').zip ${cfg.dataDir}/${name}/backups/"
+                  rm -rf ${cfg.dataDir}/${name}/backups/{world, world_nether, world_end}
+                  '';
+
+          script = if conf.backup.strategy == "local" then localScript else gitScript;
+        in
+          {
+            name = "minecraft-server-${name}-backup";
+            value = {
+              description = "Minecraft Server ${name} Backup";
+              after = [ "minecraft-server-${name}" ];
+              serviceConfig = {
+                Type = "oneshot";
+                script = script;
+              };
+            };
+          }
+        )
         servers;
+      systemd.timers = mapAttrs'
+        (name: conf:
+        {
+          wantedBy = [ "timers.target" ];
+          partOf = [ "minecraft-server-${name}-backup.service" ];
+          timerConfig.OnCalendar = conf.backup.schedule;
+        }
+        )
+      backups;
     }
   );
 }
